@@ -71,3 +71,24 @@ def test_main_disabled_noops(tmp_path, monkeypatch):
     rc = C.main(now=datetime(2026, 7, 14, tzinfo=timezone.utc),
                 run_claude=boom, skills_dir=tmp_path / "skills")
     assert rc == 0 and called["n"] == 0
+
+
+def test_curator_model_precedence(monkeypatch):
+    monkeypatch.setattr(C, "load_config", lambda: {"curator_model": "X", "model": "Y"})
+    assert C.curator_model() == "X"                     # per-role override wins
+    monkeypatch.setattr(C, "load_config", lambda: {"model": "Y"})
+    assert C.curator_model() == "Y"                     # falls back to shared `model`
+    monkeypatch.setattr(C, "load_config", lambda: {})
+    assert C.curator_model() == "claude-sonnet-5"        # default
+
+
+def test_default_claude_uses_curator_model(monkeypatch):
+    seen = {}
+    class R:  # noqa: E701
+        stdout = "[]"
+    def fake_run(cmd, **kw):
+        seen["cmd"] = cmd; return R()
+    monkeypatch.setattr(C.subprocess, "run", fake_run)
+    monkeypatch.setattr(C, "load_config", lambda: {"curator_model": "cur-x"})
+    C.default_claude("P", "[]")
+    assert "--model" in seen["cmd"] and "cur-x" in seen["cmd"]

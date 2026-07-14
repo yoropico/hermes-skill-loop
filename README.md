@@ -42,8 +42,13 @@ python3 ~/.claude/scripts/skill-loop/curator.py   # interval-guarded (24h)
 
 ## Config: `~/.claude/skill-loop.json`
 
-`enabled`, `model` (learn/curate model), `idle_threshold_minutes`,
-`curator_interval_hours`.
+- `enabled` — master kill-switch (honored by learn/usage/curator + the BCT idle watcher).
+- `model` — shared model for both learn and curator.
+- `learn_model` / `curator_model` — optional per-role overrides (`<role>_model` > `model` > default `claude-sonnet-5`). learn runs on every session end, so it can stay cheaper; curation is rare (interval-guarded) and can afford a stronger model — e.g. `"model": "claude-sonnet-5"` + `"curator_model": "claude-opus-4-8"`.
+- `idle_threshold_minutes`, `curator_interval_hours`.
+
+Edits to `~/.claude/skill-loop.json` are durable: `bootstrap.py` seeds it only when
+missing and never overwrites an existing file.
 
 ## Tests
 

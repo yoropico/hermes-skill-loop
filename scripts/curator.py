@@ -27,6 +27,13 @@ def load_config() -> dict:
         return {}
 
 
+def curator_model() -> str:
+    # `curator_model` (per-role) > `model` (shared) > default. curation is rare
+    # (interval-guarded) so it can afford a stronger model than learn.
+    c = load_config()
+    return c.get("curator_model") or c.get("model") or "claude-sonnet-5"
+
+
 def load_prompt() -> str:
     return (SCRIPT_DIR / "prompts" / "curate.md").read_text(encoding="utf-8")
 
@@ -133,7 +140,7 @@ def curate(skills_dir: Path, archive_root: Path, prompt: str, run_claude) -> lis
 
 
 def default_claude(prompt: str, manifest_json: str) -> str:
-    model = load_config().get("model", "claude-sonnet-5")
+    model = curator_model()
     proc = subprocess.run(
         ["claude", "-p", "--model", model],
         input=prompt + "\n\n=== MANIFEST ===\n" + manifest_json,

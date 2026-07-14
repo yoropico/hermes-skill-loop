@@ -86,3 +86,24 @@ def test_main_disabled_noops(tmp_path, monkeypatch):
     rc = L.main(stdin=io.StringIO(json.dumps({"transcript_path": str(tr)})),
                 run_claude=boom, skills_dir=tmp_path / "skills")
     assert rc == 0 and called["n"] == 0
+
+
+def test_learn_model_precedence(monkeypatch):
+    monkeypatch.setattr(L, "load_config", lambda: {"learn_model": "A", "model": "B"})
+    assert L.learn_model() == "A"                       # per-role override wins
+    monkeypatch.setattr(L, "load_config", lambda: {"model": "B"})
+    assert L.learn_model() == "B"                       # falls back to shared `model`
+    monkeypatch.setattr(L, "load_config", lambda: {})
+    assert L.learn_model() == "claude-sonnet-5"          # default
+
+
+def test_default_claude_uses_learn_model(monkeypatch):
+    seen = {}
+    class R:  # noqa: E701
+        stdout = "{}"
+    def fake_run(cmd, **kw):
+        seen["cmd"] = cmd; return R()
+    monkeypatch.setattr(L.subprocess, "run", fake_run)
+    monkeypatch.setattr(L, "load_config", lambda: {"learn_model": "learn-x"})
+    L.default_claude("P", "T")
+    assert "--model" in seen["cmd"] and "learn-x" in seen["cmd"]

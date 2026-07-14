@@ -21,6 +21,13 @@ def load_config() -> dict:
         return {}
 
 
+def learn_model() -> str:
+    # `learn_model` (per-role) > `model` (shared) > default. learn runs on every
+    # session end, so it can stay cheaper than the rarer curator.
+    c = load_config()
+    return c.get("learn_model") or c.get("model") or "claude-sonnet-5"
+
+
 def load_prompt() -> str:
     return (SCRIPT_DIR / "prompts" / "learn.md").read_text(encoding="utf-8")
 
@@ -61,7 +68,7 @@ def read_transcript(path: Path, retries: int = 5, delay: float = 0.3, sleep=time
 
 
 def default_claude(prompt: str, transcript_text: str) -> str:
-    model = load_config().get("model", "claude-sonnet-5")
+    model = learn_model()
     full = prompt + "\n\n=== TRANSCRIPT ===\n" + transcript_text
     proc = subprocess.run(
         ["claude", "-p", "--model", model],
