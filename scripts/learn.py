@@ -5,7 +5,7 @@ The `claude -p` call is injected (run_claude) so tests never hit the network.
 main() never raises — a failed learn must not disrupt the user.
 """
 from __future__ import annotations
-import json, re, subprocess, sys, time
+import json, os, re, subprocess, sys, time
 from pathlib import Path
 
 import skill_meta  # noqa: F401  (kept for MARKER constants / co-location)
@@ -66,6 +66,8 @@ def default_claude(prompt: str, transcript_text: str) -> str:
     proc = subprocess.run(
         ["claude", "-p", "--model", model],
         input=full, capture_output=True, text=True, timeout=300,
+        # Mark this nested session so its own SessionEnd hook no-ops (no recursion).
+        env={**os.environ, "SKILL_LOOP_INTERNAL": "1"},
     )
     return proc.stdout
 
@@ -96,6 +98,12 @@ def write_skill(skills_dir: Path, result: dict) -> Path:
 
 def main(stdin=None, run_claude=None, skills_dir=None) -> int:
     try:
+        # Reentrancy guard: we are inside our own distill `claude -p` — its
+        # SessionEnd fires this hook again; do nothing (else infinite recursion).
+        if os.environ.get("SKILL_LOOP_INTERNAL"):
+            return 0
+        if load_config().get("enabled") is False:
+            return 0
         hook = json.loads((stdin or sys.stdin).read())
         tpath = hook.get("transcript_path")
         if not tpath:

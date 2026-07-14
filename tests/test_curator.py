@@ -49,3 +49,25 @@ def test_curate_only_marked_skills(tmp_path):
     C.curate(skills, arch, "PROMPT", fake_claude)
     slugs = {e["slug"] for e in seen["manifest"]}
     assert slugs == {"learned"}                    # unmarked BCT skill excluded
+
+
+def test_default_claude_sets_reentrancy_env(monkeypatch):
+    # curator's `claude -p` also triggers SessionEnd->learn; sentinel breaks that recursion.
+    captured = {}
+    class R:  # noqa: E701
+        stdout = "[]"
+    monkeypatch.setattr(C.subprocess, "run", lambda cmd, **kw: (captured.update(kw), R())[1])
+    monkeypatch.setattr(C, "load_config", lambda: {"model": "m"})
+    C.default_claude("PROMPT", "[]")
+    assert captured["env"].get("SKILL_LOOP_INTERNAL") == "1"
+
+
+def test_main_disabled_noops(tmp_path, monkeypatch):
+    monkeypatch.setattr(C, "load_config", lambda: {"enabled": False})
+    _mk(tmp_path / "skills", "learned")
+    called = {"n": 0}
+    def boom(prompt, manifest_json):
+        called["n"] += 1; return "[]"
+    rc = C.main(now=datetime(2026, 7, 14, tzinfo=timezone.utc),
+                run_claude=boom, skills_dir=tmp_path / "skills")
+    assert rc == 0 and called["n"] == 0

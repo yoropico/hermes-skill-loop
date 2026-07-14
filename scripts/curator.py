@@ -6,7 +6,7 @@ x-origin: skill-loop; BCT-deployed skills are invisible. Pinned skills bypass
 archiving. The `claude -p` call is injected for tests. main() never raises.
 """
 from __future__ import annotations
-import json, shutil, subprocess, sys
+import json, os, shutil, subprocess, sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -138,12 +138,16 @@ def default_claude(prompt: str, manifest_json: str) -> str:
         ["claude", "-p", "--model", model],
         input=prompt + "\n\n=== MANIFEST ===\n" + manifest_json,
         capture_output=True, text=True, timeout=300,
+        # Mark this nested session so its SessionEnd (learn.py) hook no-ops.
+        env={**os.environ, "SKILL_LOOP_INTERNAL": "1"},
     )
     return proc.stdout
 
 
 def main(now=None, run_claude=None, skills_dir=None) -> int:
     try:
+        if load_config().get("enabled") is False:
+            return 0
         now = now or datetime.now(timezone.utc)
         skills_dir = Path(skills_dir) if skills_dir else _home_skills()
         interval = float(load_config().get("curator_interval_hours", 24))

@@ -8,6 +8,15 @@ import json, sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+CONFIG_PATH = Path.home() / ".claude" / "skill-loop.json"
+
+
+def load_config() -> dict:
+    try:
+        return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
 
 def usage_path() -> Path:
     return Path.home() / ".claude" / "skills" / ".usage.json"
@@ -45,6 +54,8 @@ def save_usage(path: Path, usage: dict) -> None:
 
 def main(argv=None, stdin=None, now_iso=None) -> int:
     try:
+        if load_config().get("enabled") is False:
+            return 0
         raw = (stdin or sys.stdin).read()
         hook = json.loads(raw)
         name = skill_name_from_hook(hook)

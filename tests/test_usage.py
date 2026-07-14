@@ -32,3 +32,13 @@ def test_main_ignores_non_skill(tmp_path, monkeypatch):
 def test_main_never_raises_on_garbage(tmp_path, monkeypatch):
     monkeypatch.setattr(u, "usage_path", lambda: tmp_path / ".usage.json")
     assert u.main(stdin=io.StringIO("not json")) == 0
+
+
+def test_main_disabled_noops(tmp_path, monkeypatch):
+    usage_path = tmp_path / ".usage.json"
+    monkeypatch.setattr(u, "usage_path", lambda: usage_path)
+    monkeypatch.setattr(u, "load_config", lambda: {"enabled": False})
+    hook = json.dumps({"tool_name": "Skill", "tool_input": {"skill": "foo"}})
+    rc = u.main(stdin=io.StringIO(hook), now_iso="2026-07-14T00:00:00Z")
+    assert rc == 0
+    assert not usage_path.exists()          # disabled -> nothing written

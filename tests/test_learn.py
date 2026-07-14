@@ -48,3 +48,41 @@ def test_main_end_to_end(tmp_path, monkeypatch):
     rc = L.main(stdin=io.StringIO(hook), run_claude=fake_claude, skills_dir=skills)
     assert rc == 0
     assert (skills / "learned-x" / "SKILL.md").exists()
+
+
+def test_default_claude_sets_reentrancy_env(monkeypatch):
+    # The `claude -p` we spawn must carry a sentinel so its own SessionEnd no-ops.
+    captured = {}
+    class R:  # noqa: E701
+        stdout = "{}"
+    monkeypatch.setattr(L.subprocess, "run", lambda cmd, **kw: (captured.update(kw), R())[1])
+    monkeypatch.setattr(L, "load_config", lambda: {"model": "m"})
+    L.default_claude("PROMPT", "transcript")
+    assert captured["env"].get("SKILL_LOOP_INTERNAL") == "1"
+
+
+def test_main_reentrancy_guard_when_internal_env(tmp_path, monkeypatch):
+    # Inside our own distill `claude -p`, SessionEnd fires again — must NOT re-distill.
+    monkeypatch.setenv("SKILL_LOOP_INTERNAL", "1")
+    tr = tmp_path / "tr.jsonl"; tr.write_text('{"role":"user","content":"hi"}\n')
+    called = {"n": 0}
+    def boom(prompt, inp):
+        called["n"] += 1
+        return json.dumps({"create": True, "name": "x", "description": "d", "body": "b"})
+    hook = json.dumps({"transcript_path": str(tr)})
+    rc = L.main(stdin=io.StringIO(hook), run_claude=boom, skills_dir=tmp_path / "skills")
+    assert rc == 0
+    assert called["n"] == 0                       # never distilled
+    assert not (tmp_path / "skills").exists()      # never wrote
+
+
+def test_main_disabled_noops(tmp_path, monkeypatch):
+    monkeypatch.delenv("SKILL_LOOP_INTERNAL", raising=False)
+    monkeypatch.setattr(L, "load_config", lambda: {"enabled": False})
+    tr = tmp_path / "tr.jsonl"; tr.write_text('{"role":"user"}\n')
+    called = {"n": 0}
+    def boom(prompt, inp):
+        called["n"] += 1; return "{}"
+    rc = L.main(stdin=io.StringIO(json.dumps({"transcript_path": str(tr)})),
+                run_claude=boom, skills_dir=tmp_path / "skills")
+    assert rc == 0 and called["n"] == 0
