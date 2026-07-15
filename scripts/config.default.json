@@ -2,5 +2,6 @@
   "enabled": true,
   "model": "claude-sonnet-5",
   "idle_threshold_minutes": 10,
-  "curator_interval_hours": 24
+  "curator_interval_hours": 24,
+  "curator_min_age_days": 7
 }
