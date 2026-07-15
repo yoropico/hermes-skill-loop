@@ -72,7 +72,29 @@ def _usage(skills_dir: Path) -> dict:
         return {}
 
 
-def build_manifest(skills_dir: Path) -> list[dict]:
+def skill_age_days(skill_md: Path, now: datetime) -> int | None:
+    """Age of a learned skill in whole days. Prefers the `x-learned` frontmatter
+    (authoritative), falling back to the file's mtime for skills distilled before
+    provenance stamping existed. Without an age signal `count == 0` is ambiguous
+    ("stale" vs "just born"), so the curator must never archive on count alone."""
+    fm = skill_meta.read_frontmatter(skill_md) or {}
+    learned = fm.get("x-learned")
+    born: datetime | None = None
+    if learned:
+        try:
+            born = datetime.strptime(learned.strip(), "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        except ValueError:
+            born = None
+    if born is None:
+        try:
+            born = datetime.fromtimestamp(Path(skill_md).stat().st_mtime, tz=timezone.utc)
+        except OSError:
+            return None
+    return max(0, (now - born).days)
+
+
+def build_manifest(skills_dir: Path, now: datetime | None = None) -> list[dict]:
+    now = now or datetime.now(timezone.utc)
     usage = _usage(skills_dir)
     out = []
     for md in skill_meta.list_learned(skills_dir):
@@ -84,6 +106,7 @@ def build_manifest(skills_dir: Path) -> list[dict]:
             "description": fm.get("description", ""),
             "count": u.get("count", 0),
             "last_used": u.get("last_used"),
+            "age_days": skill_age_days(md, now),
             "pinned": skill_meta.is_pinned(md),
         })
     return out
@@ -107,8 +130,10 @@ def _pin(skill_md: Path) -> None:
     Path(skill_md).write_text(text, encoding="utf-8")
 
 
-def apply_actions(actions: list[dict], skills_dir: Path, archive_root: Path) -> list[str]:
+def apply_actions(actions: list[dict], skills_dir: Path, archive_root: Path,
+                  min_age_days: int = 0, now: datetime | None = None) -> list[str]:
     skills_dir = Path(skills_dir)
+    now = now or datetime.now(timezone.utc)
     applied: list[str] = []
     for act in actions:
         slug, op = act.get("skill"), act.get("op")
@@ -118,6 +143,9 @@ def apply_actions(actions: list[dict], skills_dir: Path, archive_root: Path) -> 
         if op == "archive":
             if skill_meta.is_pinned(md):
                 continue               # pinned bypass
+            age = skill_age_days(md, now)
+            if age is not None and age < min_age_days:
+                continue               # age floor: too young to be called "stale"
             archive(md, archive_root)
             applied.append(f"archive:{slug}")
         elif op == "pin":
@@ -126,8 +154,10 @@ def apply_actions(actions: list[dict], skills_dir: Path, archive_root: Path) -> 
     return applied
 
 
-def curate(skills_dir: Path, archive_root: Path, prompt: str, run_claude) -> list[str]:
-    manifest = build_manifest(skills_dir)
+def curate(skills_dir: Path, archive_root: Path, prompt: str, run_claude,
+           min_age_days: int = 0, now: datetime | None = None) -> list[str]:
+    now = now or datetime.now(timezone.utc)
+    manifest = build_manifest(skills_dir, now)
     if not manifest:
         return []
     try:
@@ -136,7 +166,7 @@ def curate(skills_dir: Path, archive_root: Path, prompt: str, run_claude) -> lis
         actions = json.loads(out[start:end + 1]) if start != -1 else []
     except Exception:
         return []
-    return apply_actions(actions, skills_dir, archive_root)
+    return apply_actions(actions, skills_dir, archive_root, min_age_days, now)
 
 
 def default_claude(prompt: str, manifest_json: str) -> str:
@@ -157,11 +187,14 @@ def main(now=None, run_claude=None, skills_dir=None) -> int:
             return 0
         now = now or datetime.now(timezone.utc)
         skills_dir = Path(skills_dir) if skills_dir else _home_skills()
-        interval = float(load_config().get("curator_interval_hours", 24))
+        cfg = load_config()
+        interval = float(cfg.get("curator_interval_hours", 24))
+        min_age = int(cfg.get("curator_min_age_days", 7))
         sp = state_path() if skills_dir == _home_skills() else skills_dir / ".curator_state"
         if not should_run(load_state(sp), interval, now):
             return 0
-        curate(skills_dir, skills_dir / "_archive", load_prompt(), run_claude or default_claude)
+        curate(skills_dir, skills_dir / "_archive", load_prompt(),
+               run_claude or default_claude, min_age, now)
         save_state(sp, now.isoformat())
     except Exception:
         pass
