@@ -136,7 +136,12 @@ def apply_actions(actions: list[dict], skills_dir: Path, archive_root: Path,
     now = now or datetime.now(timezone.utc)
     applied: list[str] = []
     for act in actions:
-        slug, op = act.get("skill"), act.get("op")
+        # `slug` is what prompts/curate.md tells the model to emit (it mirrors the
+        # manifest field name); `skill` is accepted as a synonym so a model that
+        # echoes the older key still lands. Reading only one of the two silently
+        # drops every action -- the curator then stamps .curator_state and looks
+        # healthy while doing nothing (live no-op, 2026-07-14..30).
+        slug, op = act.get("slug") or act.get("skill"), act.get("op")
         md = skills_dir / str(slug) / "SKILL.md"
         if not md.exists() or not skill_meta.is_learned(md):
             continue

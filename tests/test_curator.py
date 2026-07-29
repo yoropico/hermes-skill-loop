@@ -1,5 +1,5 @@
 # .claude/skill-loop/tests/test_curator.py
-import sys, pathlib, json
+import sys, pathlib, json, re
 from datetime import datetime, timezone, timedelta
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "scripts"))
 import curator as C
@@ -150,13 +150,53 @@ def test_apply_actions_pin_ignores_age_floor(tmp_path):
 def test_main_threads_configured_age_floor(tmp_path, monkeypatch):
     # End-to-end: main() must read curator_min_age_days and let it veto an archive
     # the model proposes for a young skill.
-    skills = tmp_path / "skills"
-    _mk(skills, "fresh", learned_on="2026-07-15")
-    monkeypatch.setattr(C, "load_config",
-                        lambda: {"curator_min_age_days": 7, "curator_interval_hours": 0})
+    #
+    # DIFFERENTIAL, on purpose: the same proposal must go THROUGH when the floor is
+    # 0. A survive-only assertion passes even when the action never reaches the
+    # applier at all -- which is exactly how this test stayed green while the
+    # applier read a key the prompt never emits (curator no-op, 2026-07-14..30).
     monkeypatch.setattr(C, "load_prompt", lambda: "PROMPT")
     def model(prompt, manifest_json):
         return '[{"slug":"fresh","op":"archive"}]'
-    rc = C.main(now=NOW, run_claude=model, skills_dir=skills)
-    assert rc == 0
-    assert (skills / "fresh").exists()          # age floor vetoed the archive
+
+    floored = tmp_path / "floored"
+    _mk(floored, "fresh", learned_on="2026-07-15")
+    monkeypatch.setattr(C, "load_config",
+                        lambda: {"curator_min_age_days": 7, "curator_interval_hours": 0})
+    assert C.main(now=NOW, run_claude=model, skills_dir=floored) == 0
+    assert (floored / "fresh").exists()         # age floor vetoed the archive
+
+    unfloored = tmp_path / "unfloored"
+    _mk(unfloored, "fresh", learned_on="2026-07-15")
+    monkeypatch.setattr(C, "load_config",
+                        lambda: {"curator_min_age_days": 0, "curator_interval_hours": 0})
+    assert C.main(now=NOW, run_claude=model, skills_dir=unfloored) == 0
+    assert not (unfloored / "fresh").exists()   # no floor -> the action really applies
+
+
+def test_apply_actions_accepts_the_slug_key_the_prompt_emits(tmp_path):
+    # curate.md instructs the model to reply with {"slug": ..., "op": ...}. The
+    # applier must read that key; otherwise every proposed action is silently
+    # dropped and the curator is a no-op that still stamps .curator_state.
+    skills = tmp_path / "skills"; arch = skills / "_archive"
+    _mk(skills, "stale", learned_on="2026-06-01")
+    applied = C.apply_actions([{"slug": "stale", "op": "archive"}], skills, arch,
+                              min_age_days=7, now=NOW)
+    assert not (skills / "stale").exists()
+    assert applied == ["archive:stale"]
+
+
+def test_prompt_reply_key_is_honoured_by_the_applier(tmp_path):
+    # Contract guard against prompt<->code drift: whatever identifier key
+    # prompts/curate.md tells the model to emit MUST be a key apply_actions
+    # reads. Editing the prompt's reply shape without touching the applier is
+    # the defect this pins down.
+    prompt = (pathlib.Path(C.__file__).resolve().parent / "prompts" / "curate.md").read_text()
+    keys = set(re.findall(r'\{"(\w+)"\s*:\s*"\.\.\."\s*,\s*"op"', prompt))
+    assert keys, "curate.md no longer documents a reply shape this test can read"
+    for i, key in enumerate(sorted(keys)):
+        skills = tmp_path / ("k%d" % i); arch = skills / "_archive"
+        _mk(skills, "aged", learned_on="2026-06-01")
+        applied = C.apply_actions([{key: "aged", "op": "archive"}], skills, arch,
+                                  min_age_days=7, now=NOW)
+        assert applied == ["archive:aged"], "applier ignores prompt key %r" % key
