@@ -200,3 +200,159 @@ def test_prompt_reply_key_is_honoured_by_the_applier(tmp_path):
         applied = C.apply_actions([{key: "aged", "op": "archive"}], skills, arch,
                                   min_age_days=7, now=NOW)
         assert applied == ["archive:aged"], "applier ignores prompt key %r" % key
+
+
+# --- observability -----------------------------------------------------------
+# The no-op survived 16 days because every failure path returned quietly. These
+# pin the reverse: whatever the curator does or declines to do leaves a record.
+
+import runlog as R  # noqa: E402
+
+
+def _log(tmp_path):
+    return tmp_path / "log.jsonl"
+
+
+def test_run_logs_proposed_and_applied(tmp_path, monkeypatch):
+    skills = tmp_path / "skills"; log = _log(tmp_path)
+    _mk(skills, "aged", learned_on="2026-06-01")
+    monkeypatch.setattr(C, "load_config", lambda: {"curator_interval_hours": 0})
+    monkeypatch.setattr(C, "load_prompt", lambda: "PROMPT")
+    monkeypatch.setattr(C, "log_target", lambda: log)
+    C.main(now=NOW, run_claude=lambda p, m: '[{"slug":"aged","op":"archive"}]',
+           skills_dir=skills)
+    ev = [e for e in R.read_events(log) if e["role"] == "curator"][-1]
+    assert ev["applied"] == ["archive:aged"]
+    assert ev["proposed"] == 1
+    assert ev["manifest_count"] == 1
+    assert ev["outcome"] == "applied"
+
+
+def test_run_logs_the_model_error_instead_of_swallowing_it(tmp_path, monkeypatch):
+    # `except Exception: return []` is exactly how a dead model id or a missing
+    # `claude` binary would present as "the curator decided to do nothing".
+    skills = tmp_path / "skills"; log = _log(tmp_path)
+    _mk(skills, "aged", learned_on="2026-06-01")
+    monkeypatch.setattr(C, "load_config", lambda: {"curator_interval_hours": 0})
+    monkeypatch.setattr(C, "load_prompt", lambda: "PROMPT")
+    monkeypatch.setattr(C, "log_target", lambda: log)
+    def boom(prompt, manifest_json):
+        raise RuntimeError("model is gone")
+    C.main(now=NOW, run_claude=boom, skills_dir=skills)
+    ev = [e for e in R.read_events(log) if e["role"] == "curator"][-1]
+    assert ev["outcome"] == "error"
+    assert "model is gone" in ev["error"]
+
+
+def test_run_logs_unparseable_model_output(tmp_path, monkeypatch):
+    skills = tmp_path / "skills"; log = _log(tmp_path)
+    _mk(skills, "aged", learned_on="2026-06-01")
+    monkeypatch.setattr(C, "load_config", lambda: {"curator_interval_hours": 0})
+    monkeypatch.setattr(C, "load_prompt", lambda: "PROMPT")
+    monkeypatch.setattr(C, "log_target", lambda: log)
+    C.main(now=NOW, run_claude=lambda p, m: "I refuse to answer in JSON.",
+           skills_dir=skills)
+    ev = [e for e in R.read_events(log) if e["role"] == "curator"][-1]
+    assert ev["outcome"] == "unparseable"
+
+
+def test_skipped_actions_are_logged_with_a_reason(tmp_path, monkeypatch):
+    skills = tmp_path / "skills"; log = _log(tmp_path)
+    _mk(skills, "pinned", pinned=True, learned_on="2026-06-01")
+    _mk(skills, "young", learned_on="2026-07-15")
+    monkeypatch.setattr(C, "load_config",
+                        lambda: {"curator_interval_hours": 0, "curator_min_age_days": 7})
+    monkeypatch.setattr(C, "load_prompt", lambda: "PROMPT")
+    monkeypatch.setattr(C, "log_target", lambda: log)
+    proposal = '[{"slug":"pinned","op":"archive"},{"slug":"young","op":"archive"},' \
+               '{"slug":"ghost","op":"archive"}]'
+    C.main(now=NOW, run_claude=lambda p, m: proposal, skills_dir=skills)
+    ev = [e for e in R.read_events(log) if e["role"] == "curator"][-1]
+    reasons = {s["slug"]: s["reason"] for s in ev["skipped"]}
+    assert reasons == {"pinned": "pinned", "young": "too_young", "ghost": "not_a_learned_skill"}
+    assert ev["applied"] == []
+
+
+def test_interval_guard_skip_is_logged(tmp_path, monkeypatch):
+    skills = tmp_path / "skills"; log = _log(tmp_path)
+    _mk(skills, "aged", learned_on="2026-06-01")
+    (skills / ".curator_state").write_text(json.dumps({"last_run": NOW.isoformat()}))
+    monkeypatch.setattr(C, "load_config", lambda: {"curator_interval_hours": 24})
+    monkeypatch.setattr(C, "log_target", lambda: log)
+    called = {"n": 0}
+    def model(prompt, manifest_json):
+        called["n"] += 1; return "[]"
+    C.main(now=NOW, run_claude=model, skills_dir=skills)
+    assert called["n"] == 0
+    ev = [e for e in R.read_events(log) if e["role"] == "curator"][-1]
+    assert ev["outcome"] == "skipped" and ev["reason"] == "interval"
+
+
+def test_dry_run_logs_the_proposal_and_changes_nothing(tmp_path, monkeypatch):
+    # Makes preview a first-class, repeatable operation instead of a throwaway
+    # script -- and it is the safe way to see what a 16-day-idle curator wants
+    # to archive before letting it.
+    skills = tmp_path / "skills"; log = _log(tmp_path)
+    _mk(skills, "aged", learned_on="2026-06-01")
+    monkeypatch.setattr(C, "load_config", lambda: {"curator_interval_hours": 0})
+    monkeypatch.setattr(C, "load_prompt", lambda: "PROMPT")
+    monkeypatch.setattr(C, "log_target", lambda: log)
+    rc = C.main(now=NOW, run_claude=lambda p, m: '[{"slug":"aged","op":"archive"}]',
+                skills_dir=skills, dry_run=True)
+    assert rc == 0
+    assert (skills / "aged").exists()                    # nothing applied
+    ev = [e for e in R.read_events(log) if e["role"] == "curator"][-1]
+    assert ev["dry_run"] is True
+    assert ev["would_apply"] == ["archive:aged"]
+    assert ev["applied"] == []
+
+
+def test_dry_run_does_not_advance_the_interval_clock(tmp_path, monkeypatch):
+    # A preview must not consume the day's real run.
+    skills = tmp_path / "skills"; log = _log(tmp_path)
+    _mk(skills, "aged", learned_on="2026-06-01")
+    monkeypatch.setattr(C, "load_config", lambda: {"curator_interval_hours": 24})
+    monkeypatch.setattr(C, "load_prompt", lambda: "PROMPT")
+    monkeypatch.setattr(C, "log_target", lambda: log)
+    C.main(now=NOW, run_claude=lambda p, m: "[]", skills_dir=skills, dry_run=True)
+    assert not (skills / ".curator_state").exists()
+
+
+def test_dry_run_flag_is_parsed_from_argv():
+    assert C.parse_args(["--dry-run"])["dry_run"] is True
+    assert C.parse_args([])["dry_run"] is False
+
+
+def test_keep_decisions_are_counted_not_listed(tmp_path, monkeypatch):
+    # "keep" is the common case; listing each one would bury the log. Counting it
+    # still lets the numbers reconcile: proposed == kept + applied + skipped.
+    skills = tmp_path / "skills"; log = _log(tmp_path)
+    _mk(skills, "a", learned_on="2026-06-01")
+    _mk(skills, "b", learned_on="2026-06-01")
+    monkeypatch.setattr(C, "load_config", lambda: {"curator_interval_hours": 0})
+    monkeypatch.setattr(C, "load_prompt", lambda: "PROMPT")
+    monkeypatch.setattr(C, "log_target", lambda: log)
+    C.main(now=NOW, skills_dir=skills,
+           run_claude=lambda p, m: '[{"slug":"a","op":"keep"},{"slug":"b","op":"archive"}]')
+    ev = [e for e in R.read_events(log) if e["role"] == "curator"][-1]
+    assert ev["proposed"] == 2 and ev["kept"] == 1
+    assert ev["applied"] == ["archive:b"] and ev["skipped"] == []
+    assert ev["proposed"] == ev["kept"] + len(ev["applied"]) + len(ev["skipped"])
+
+
+def test_an_action_that_fails_to_apply_is_recorded_not_swallowed(tmp_path, monkeypatch):
+    # Per-action failures used to vanish too; a failed archive must be visible.
+    skills = tmp_path / "skills"; log = _log(tmp_path)
+    _mk(skills, "aged", learned_on="2026-06-01")
+    monkeypatch.setattr(C, "load_config", lambda: {"curator_interval_hours": 0})
+    monkeypatch.setattr(C, "load_prompt", lambda: "PROMPT")
+    monkeypatch.setattr(C, "log_target", lambda: log)
+    def bad_archive(md, root):
+        raise OSError("read-only filesystem")
+    monkeypatch.setattr(C, "archive", bad_archive)
+    C.main(now=NOW, run_claude=lambda p, m: '[{"slug":"aged","op":"archive"}]',
+           skills_dir=skills)
+    ev = [e for e in R.read_events(log) if e["role"] == "curator"][-1]
+    assert ev["applied"] == []
+    assert ev["failed"][0]["slug"] == "aged"
+    assert "read-only filesystem" in ev["failed"][0]["error"]

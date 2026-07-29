@@ -4,16 +4,31 @@
 Never deletes (archive is a move to _archive/). Touches ONLY skills marked
 x-origin: skill-loop; BCT-deployed skills are invisible. Pinned skills bypass
 archiving. The `claude -p` call is injected for tests. main() never raises.
+
+Every run leaves one line in the run log (see runlog.py): what the model proposed,
+what was applied, what was skipped and why, what failed. That is not decoration --
+a bare `except Exception: return []` plus a `.curator_state` timestamp let this
+script apply literally nothing for 16 days while looking perfectly healthy.
+`--dry-run` exists for the same reason: you can ask what it WOULD do without
+letting it.
 """
 from __future__ import annotations
-import json, os, shutil, subprocess, sys
+import json, os, shutil, subprocess, sys, time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import runlog
 import skill_meta
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = Path.home() / ".claude" / "skill-loop.json"
+
+# Why an action did not happen. Recorded per action, so a quiet run is readable
+# instead of merely quiet.
+SKIP_NOT_LEARNED = "not_a_learned_skill"   # unknown slug, or a skill we don't own
+SKIP_PINNED = "pinned"
+SKIP_TOO_YOUNG = "too_young"
+SKIP_UNKNOWN_OP = "unknown_op"
 
 
 def _home_skills() -> Path:
@@ -27,6 +42,11 @@ def load_config() -> dict:
         return {}
 
 
+def log_target():
+    """Indirection so tests can redirect the log without reaching into runlog."""
+    return runlog.log_path()
+
+
 def curator_model() -> str:
     # `curator_model` (per-role) > `model` (shared) > default. curation is rare
     # (interval-guarded) so it can afford a stronger model than learn.
@@ -36,6 +56,11 @@ def curator_model() -> str:
 
 def load_prompt() -> str:
     return (SCRIPT_DIR / "prompts" / "curate.md").read_text(encoding="utf-8")
+
+
+def parse_args(argv=None) -> dict:
+    argv = list(argv or [])
+    return {"dry_run": "--dry-run" in argv or "-n" in argv}
 
 
 def state_path() -> Path:
@@ -130,48 +155,127 @@ def _pin(skill_md: Path) -> None:
     Path(skill_md).write_text(text, encoding="utf-8")
 
 
-def apply_actions(actions: list[dict], skills_dir: Path, archive_root: Path,
-                  min_age_days: int = 0, now: datetime | None = None) -> list[str]:
+def plan_actions(actions: list, skills_dir, min_age_days: int = 0,
+                 now: datetime | None = None):
+    """Decide what each proposed action would do WITHOUT touching the filesystem.
+
+    Returns (planned, skipped). Splitting the judgement from the execution is what
+    makes --dry-run honest: the preview runs the exact same decision the real run
+    does, rather than a parallel approximation free to drift out of agreement.
+    """
     skills_dir = Path(skills_dir)
     now = now or datetime.now(timezone.utc)
-    applied: list[str] = []
+    planned, skipped = [], []
     for act in actions:
+        if not isinstance(act, dict):
+            continue
         # `slug` is what prompts/curate.md tells the model to emit (it mirrors the
         # manifest field name); `skill` is accepted as a synonym so a model that
         # echoes the older key still lands. Reading only one of the two silently
         # drops every action -- the curator then stamps .curator_state and looks
         # healthy while doing nothing (live no-op, 2026-07-14..30).
         slug, op = act.get("slug") or act.get("skill"), act.get("op")
+        if op == "keep":
+            continue                                    # counted by the caller
         md = skills_dir / str(slug) / "SKILL.md"
         if not md.exists() or not skill_meta.is_learned(md):
+            skipped.append({"slug": slug, "op": op, "reason": SKIP_NOT_LEARNED})
             continue
         if op == "archive":
             if skill_meta.is_pinned(md):
-                continue               # pinned bypass
+                skipped.append({"slug": slug, "op": op, "reason": SKIP_PINNED})
+                continue
             age = skill_age_days(md, now)
             if age is not None and age < min_age_days:
-                continue               # age floor: too young to be called "stale"
-            archive(md, archive_root)
-            applied.append(f"archive:{slug}")
+                skipped.append({"slug": slug, "op": op, "reason": SKIP_TOO_YOUNG,
+                                "age_days": age, "floor": min_age_days})
+                continue
+            planned.append({"slug": slug, "op": op, "md": md})
         elif op == "pin":
-            _pin(md)
-            applied.append(f"pin:{slug}")
+            planned.append({"slug": slug, "op": op, "md": md})
+        else:
+            skipped.append({"slug": slug, "op": op, "reason": SKIP_UNKNOWN_OP})
+    return planned, skipped
+
+
+def _execute(planned: list, archive_root):
+    """Carry out planned actions. Returns (applied_labels, failures)."""
+    applied, failed = [], []
+    for p in planned:
+        try:
+            if p["op"] == "archive":
+                archive(p["md"], archive_root)
+            else:
+                _pin(p["md"])
+            applied.append("%s:%s" % (p["op"], p["slug"]))
+        except Exception as e:
+            failed.append({"slug": p["slug"], "op": p["op"],
+                           "error": "%s: %s" % (type(e).__name__, e)})
+    return applied, failed
+
+
+def apply_actions(actions: list, skills_dir, archive_root,
+                  min_age_days: int = 0, now: datetime | None = None) -> list:
+    planned, _skipped = plan_actions(actions, skills_dir, min_age_days, now)
+    applied, _failed = _execute(planned, archive_root)
     return applied
 
 
-def curate(skills_dir: Path, archive_root: Path, prompt: str, run_claude,
-           min_age_days: int = 0, now: datetime | None = None) -> list[str]:
+def _parse_actions(out: str):
+    """The JSON array in the model's reply, or None if there is not one."""
+    try:
+        start, end = out.find("["), out.rfind("]")
+        if start == -1 or end == -1 or end < start:
+            return None
+        data = json.loads(out[start:end + 1])
+    except Exception:
+        return None
+    return data if isinstance(data, list) else None
+
+
+def curate(skills_dir, archive_root, prompt: str, run_claude,
+           min_age_days: int = 0, now: datetime | None = None,
+           dry_run: bool = False) -> dict:
+    """Run one curation. Returns the record of what happened -- which is exactly
+    what gets logged, so the log can never disagree with the behaviour."""
     now = now or datetime.now(timezone.utc)
     manifest = build_manifest(skills_dir, now)
+    rec = {"outcome": "empty", "dry_run": bool(dry_run),
+           "manifest_count": len(manifest), "proposed": 0, "kept": 0,
+           "applied": [], "would_apply": [], "skipped": [], "failed": []}
     if not manifest:
-        return []
+        return rec
+
+    started = time.time()
     try:
         out = run_claude(prompt, json.dumps(manifest))
-        start, end = out.find("["), out.rfind("]")
-        actions = json.loads(out[start:end + 1]) if start != -1 else []
-    except Exception:
-        return []
-    return apply_actions(actions, skills_dir, archive_root, min_age_days, now)
+    except Exception as e:
+        # A dead model id, a missing `claude` binary, a timeout -- all of these
+        # used to present as "the curator thought about it and chose nothing".
+        rec["outcome"] = "error"
+        rec["error"] = "%s: %s" % (type(e).__name__, e)
+        rec["duration_ms"] = int((time.time() - started) * 1000)
+        return rec
+    rec["duration_ms"] = int((time.time() - started) * 1000)
+
+    actions = _parse_actions(out)
+    if actions is None:
+        rec["outcome"] = "unparseable"
+        rec["raw_head"] = (out or "")[:200]
+        return rec
+
+    planned, skipped = plan_actions(actions, skills_dir, min_age_days, now)
+    rec["proposed"] = len(actions)
+    rec["kept"] = sum(1 for a in actions if isinstance(a, dict) and a.get("op") == "keep")
+    rec["skipped"] = skipped
+    labels = ["%s:%s" % (p["op"], p["slug"]) for p in planned]
+    if dry_run:
+        rec["outcome"] = "dry_run"
+        rec["would_apply"] = labels
+        return rec
+    rec["applied"], rec["failed"] = _execute(planned, archive_root)
+    rec["outcome"] = "applied"
+    return rec
 
 
 def default_claude(prompt: str, manifest_json: str) -> str:
@@ -186,25 +290,41 @@ def default_claude(prompt: str, manifest_json: str) -> str:
     return proc.stdout
 
 
-def main(now=None, run_claude=None, skills_dir=None) -> int:
+def main(now=None, run_claude=None, skills_dir=None, dry_run: bool = False) -> int:
+    rec = None
+    now = now or datetime.now(timezone.utc)
     try:
-        if load_config().get("enabled") is False:
-            return 0
-        now = now or datetime.now(timezone.utc)
-        skills_dir = Path(skills_dir) if skills_dir else _home_skills()
         cfg = load_config()
+        if cfg.get("enabled") is False:
+            return 0
+        skills_dir = Path(skills_dir) if skills_dir else _home_skills()
         interval = float(cfg.get("curator_interval_hours", 24))
         min_age = int(cfg.get("curator_min_age_days", 7))
         sp = state_path() if skills_dir == _home_skills() else skills_dir / ".curator_state"
-        if not should_run(load_state(sp), interval, now):
+        # A preview is not a run: it ignores the interval guard (ask any time) and
+        # never stamps the clock (so it cannot consume the day's real run).
+        if not dry_run and not should_run(load_state(sp), interval, now):
+            runlog.emit("curator",
+                        {"outcome": "skipped", "reason": "interval",
+                         "interval_hours": interval,
+                         "last_run": load_state(sp).get("last_run")},
+                        path=log_target(), now_iso=now.isoformat())
             return 0
-        curate(skills_dir, skills_dir / "_archive", load_prompt(),
-               run_claude or default_claude, min_age, now)
-        save_state(sp, now.isoformat())
-    except Exception:
-        pass
+        rec = curate(skills_dir, skills_dir / "_archive", load_prompt(),
+                     run_claude or default_claude, min_age, now, dry_run=dry_run)
+        rec["model"] = curator_model()
+        if not dry_run:
+            save_state(sp, now.isoformat())
+    except Exception as e:
+        runlog.emit("curator",
+                    {"outcome": "error", "error": "%s: %s" % (type(e).__name__, e)},
+                    path=log_target(), now_iso=now.isoformat())
+        return 0
+    finally:
+        if rec is not None:
+            runlog.emit("curator", rec, path=log_target(), now_iso=now.isoformat())
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(dry_run=parse_args(sys.argv[1:])["dry_run"]))
