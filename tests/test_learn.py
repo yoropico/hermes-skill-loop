@@ -215,3 +215,96 @@ def test_main_new_skill_records_session_id(tmp_path, monkeypatch):
            run_claude=fake_claude, skills_dir=tmp_path)
     md = (tmp_path / "n" / "SKILL.md").read_text()
     assert "x-source: sess-1" in md and "x-learned: " in md
+
+
+# --- observability -----------------------------------------------------------
+# learn runs on EVERY session end, so its silent paths are the loop's main blind
+# spot -- and the reason it skipped is also our only detector for Claude Code
+# renaming a SessionEnd payload key. A run of "no_transcript_path" lines is drift.
+
+import runlog as R  # noqa: E402
+
+
+def _hook(**kw):
+    base = {"session_id": "s1", "transcript_path": "/nope", "cwd": "/tmp",
+            "hook_event_name": "SessionEnd", "reason": "prompt_input_exit"}
+    base.update(kw)
+    return json.dumps(base)
+
+
+def test_missing_transcript_path_is_logged_as_a_contract_signal(tmp_path, monkeypatch):
+    log = tmp_path / "log.jsonl"
+    monkeypatch.setattr(L, "load_config", lambda: {})
+    monkeypatch.setattr(L, "log_target", lambda: log)
+    monkeypatch.delenv("SKILL_LOOP_INTERNAL", raising=False)
+    hook = json.dumps({"session_id": "s1", "hook_event_name": "SessionEnd"})
+    L.main(stdin=io.StringIO(hook), run_claude=lambda p, t: "{}",
+           skills_dir=tmp_path / "skills")
+    ev = [e for e in R.read_events(log) if e["role"] == "learn"][-1]
+    assert ev["outcome"] == "skipped" and ev["reason"] == "no_transcript_path"
+    assert sorted(ev["hook_keys"]) == ["hook_event_name", "session_id"]
+
+
+def test_empty_transcript_is_logged(tmp_path, monkeypatch):
+    log = tmp_path / "log.jsonl"
+    t = tmp_path / "t.jsonl"; t.write_text("   ")
+    monkeypatch.setattr(L, "load_config", lambda: {})
+    monkeypatch.setattr(L, "log_target", lambda: log)
+    monkeypatch.setattr(L, "read_transcript", lambda p, **kw: "   ")
+    monkeypatch.delenv("SKILL_LOOP_INTERNAL", raising=False)
+    L.main(stdin=io.StringIO(_hook(transcript_path=str(t))),
+           run_claude=lambda p, tx: "{}", skills_dir=tmp_path / "skills")
+    ev = [e for e in R.read_events(log) if e["role"] == "learn"][-1]
+    assert ev["outcome"] == "skipped" and ev["reason"] == "empty_transcript"
+
+
+def test_a_create_decision_is_logged_with_the_slug(tmp_path, monkeypatch):
+    log = tmp_path / "log.jsonl"; skills = tmp_path / "skills"
+    monkeypatch.setattr(L, "load_config", lambda: {})
+    monkeypatch.setattr(L, "log_target", lambda: log)
+    monkeypatch.setattr(L, "read_transcript", lambda p, **kw: "real work happened")
+    monkeypatch.setattr(L, "load_prompt", lambda name="learn.md": "P")
+    monkeypatch.delenv("SKILL_LOOP_INTERNAL", raising=False)
+    out = json.dumps({"create": True, "name": "My New Thing",
+                      "description": "d", "body": "b"})
+    L.main(stdin=io.StringIO(_hook()), run_claude=lambda p, t: out, skills_dir=skills)
+    ev = [e for e in R.read_events(log) if e["role"] == "learn"][-1]
+    assert ev["outcome"] == "created" and ev["slug"] == "my-new-thing"
+
+
+def test_a_refused_distill_is_logged(tmp_path, monkeypatch):
+    log = tmp_path / "log.jsonl"
+    monkeypatch.setattr(L, "load_config", lambda: {})
+    monkeypatch.setattr(L, "log_target", lambda: log)
+    monkeypatch.setattr(L, "read_transcript", lambda p, **kw: "trivial")
+    monkeypatch.setattr(L, "load_prompt", lambda name="learn.md": "P")
+    monkeypatch.delenv("SKILL_LOOP_INTERNAL", raising=False)
+    L.main(stdin=io.StringIO(_hook()), run_claude=lambda p, t: '{"create": false}',
+           skills_dir=tmp_path / "skills")
+    ev = [e for e in R.read_events(log) if e["role"] == "learn"][-1]
+    assert ev["outcome"] == "nothing"
+
+
+def test_a_model_error_is_logged_not_swallowed(tmp_path, monkeypatch):
+    log = tmp_path / "log.jsonl"
+    monkeypatch.setattr(L, "load_config", lambda: {})
+    monkeypatch.setattr(L, "log_target", lambda: log)
+    monkeypatch.setattr(L, "read_transcript", lambda p, **kw: "work")
+    monkeypatch.setattr(L, "load_prompt", lambda name="learn.md": "P")
+    monkeypatch.delenv("SKILL_LOOP_INTERNAL", raising=False)
+    def boom(prompt, transcript):
+        raise RuntimeError("model is gone")
+    L.main(stdin=io.StringIO(_hook()), run_claude=boom, skills_dir=tmp_path / "skills")
+    ev = [e for e in R.read_events(log) if e["role"] == "learn"][-1]
+    assert ev["outcome"] == "error" and "model is gone" in ev["error"]
+
+
+def test_the_reentrancy_sentinel_logs_nothing(tmp_path, monkeypatch):
+    # The sentinel fires on every nested `claude -p` we spawn. Logging it would
+    # bury the real events under our own noise.
+    log = tmp_path / "log.jsonl"
+    monkeypatch.setenv("SKILL_LOOP_INTERNAL", "1")
+    monkeypatch.setattr(L, "log_target", lambda: log)
+    L.main(stdin=io.StringIO(_hook()), run_claude=lambda p, t: "{}",
+           skills_dir=tmp_path / "skills")
+    assert R.read_events(log) == []

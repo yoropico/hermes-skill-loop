@@ -10,12 +10,18 @@ Without stage 2 a later, better lesson forks a stale twin instead of correcting
 the original (observed: the BCT redeploy skill froze a workaround as the answer).
 
 The `claude -p` call is injected (run_claude) so tests never hit the network.
-main() never raises — a failed learn must not disrupt the user.
+main() never raises — a failed learn must not disrupt the user. But "never raises"
+used to mean "never explains", so every exit now records its outcome in the run
+log (see runlog.py). That log is also the loop's only detector for Claude Code
+changing the SessionEnd payload: if `transcript_path` is ever renamed upstream,
+learn goes quiet, and the only way to notice is a run of `no_transcript_path`
+lines rather than nothing at all.
 """
 from __future__ import annotations
 import json, os, re, subprocess, sys, time
 from pathlib import Path
 
+import runlog
 import skill_meta
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -27,6 +33,11 @@ def load_config() -> dict:
         return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
+
+
+def log_target():
+    """Indirection so tests can redirect the log without reaching into runlog."""
+    return runlog.log_path()
 
 
 def learn_model() -> str:
@@ -162,38 +173,72 @@ def refine(skills_dir: Path, name: str, transcript_text: str, run_claude) -> dic
     }
 
 
+def _log(event: dict) -> None:
+    runlog.emit("learn", event, path=log_target())
+
+
 def main(stdin=None, run_claude=None, skills_dir=None, today=None) -> int:
+    session_id = None
+    started = time.time()
     try:
         # Reentrancy guard: we are inside our own distill `claude -p` — its
         # SessionEnd fires this hook again; do nothing (else infinite recursion).
+        # Deliberately unlogged: this fires for every nested call we make, and the
+        # noise would bury the events worth reading.
         if os.environ.get("SKILL_LOOP_INTERNAL"):
             return 0
         if load_config().get("enabled") is False:
-            return 0
+            return 0                       # kill-switch: silence is the point
         hook = json.loads((stdin or sys.stdin).read())
+        session_id = hook.get("session_id")
         tpath = hook.get("transcript_path")
         if not tpath:
+            # Contract signal, not a shrug: either the payload really lacks the
+            # key or upstream renamed it. Record the keys we DID get so the
+            # difference is diagnosable from the log alone.
+            _log({"outcome": "skipped", "reason": "no_transcript_path",
+                  "session_id": session_id, "hook_keys": sorted(hook.keys())})
             return 0
         transcript = read_transcript(Path(tpath))
         if not transcript.strip():
+            _log({"outcome": "skipped", "reason": "empty_transcript",
+                  "session_id": session_id, "transcript_path": str(tpath)})
             return 0
 
         skills = Path(skills_dir or (Path.home() / ".claude" / "skills"))
         run = run_claude or default_claude
-        session_id = hook.get("session_id")
         learned_on = today or time.strftime("%Y-%m-%d")
 
         prompt = load_prompt() + "\n\n=== SKILLS YOU HAVE ALREADY LEARNED ===\n" + skill_index(skills)
         result = distill(transcript, prompt, run)
         if not result:
+            _log({"outcome": "nothing", "session_id": session_id,
+                  "model": learn_model(),
+                  "duration_ms": int((time.time() - started) * 1000)})
             return 0
-        if result.get("update"):
-            result = refine(skills, result["update"], transcript, run)
+        updating = bool(result.get("update"))
+        target = result.get("update") if updating else None
+        if updating:
+            result = refine(skills, target, transcript, run)
             if not result:
+                _log({"outcome": "skipped", "reason": "refine_refused",
+                      "session_id": session_id, "target": target,
+                      "model": learn_model()})
                 return 0
-        write_skill(skills, result, session_id, learned_on)
-    except Exception:
-        pass
+        written = write_skill(skills, result, session_id, learned_on)
+        if written is None:
+            # The slug collides with a skill we did not author; writing would both
+            # destroy it and hand it to the curator. Worth knowing it happened.
+            _log({"outcome": "refused", "reason": "slug_owned_by_another_skill",
+                  "session_id": session_id, "slug": slugify(result["name"])})
+            return 0
+        _log({"outcome": "updated" if updating else "created",
+              "session_id": session_id, "slug": slugify(result["name"]),
+              "model": learn_model(),
+              "duration_ms": int((time.time() - started) * 1000)})
+    except Exception as e:
+        _log({"outcome": "error", "session_id": session_id,
+              "error": "%s: %s" % (type(e).__name__, e)})
     return 0
 
 
