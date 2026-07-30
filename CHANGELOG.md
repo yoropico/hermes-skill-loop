@@ -71,15 +71,24 @@ Priority-ordered follow-ups to the extraction. 130 tests (was 89).
   14 skills, and every later lesson would have forked a stale twin beside the
   original — the exact failure the two-stage learn exists to prevent.
 
-### Investigated, unresolved
+### Investigated — cause identified, not ours to fix
 
-Five learned skills render in Claude Code's session listing with **no description**,
-making them unmatchable while still costing a listing line. Our side is clean and
-provably so: the descriptions are present in every file, and on every measurable
-dimension — frontmatter key set, key count, description length, line count, colons,
-quotes, CRLF, BOM, byte layout — the five are indistinguishable from skills whose
-descriptions do render, with fully overlapping ranges. No user-skill index or cache
-exists to hold a stale copy. The omissions are interleaved alphabetically, so it is
-not a listing cutoff. Cause is in Claude Code's system-prompt assembly and is not
-observable from here; `doctor`'s `descriptions` check confirms the file side stays
-correct.
+Five learned skills rendered in Claude Code's session listing with **no
+description**, which would make them unmatchable while still costing a listing line.
+
+The file side is clean and provably so: the descriptions are present in every file,
+and on every measurable dimension — frontmatter key set, key count, description
+length, line count, colons, quotes, CRLF, BOM, byte layout — the five were
+indistinguishable from skills whose descriptions render, with fully overlapping
+ranges. No user-skill index or cache exists that could hold a stale copy, and the
+omissions were interleaved alphabetically, so it was not a listing cutoff.
+
+Then the listing refreshed mid-session and **the set changed** with no file having
+been touched: `sentinelone-api-fp-exclusion-and-resolve` started rendering its
+description, `prisma-mock-gap-dev-db-scratch-verify` stopped, and unrelated
+third-party plugin skills (`security-review`, `ponytail:*`) lost theirs too.
+
+So the omission is not a property of any skill — Claude Code's listing assembly
+drops descriptions intermittently. That also explains why no distinguishing feature
+could be found: there was none to find. Nothing to fix on this side;
+`doctor`'s `descriptions` check keeps the file side honest, which is the part we own.

@@ -199,6 +199,17 @@ tests calling `main()` once forged ten events into the real
 `~/.claude/skill-loop.jsonl`, and a diagnostic log the suite can forge is worse than
 no log.
 
+## Design and history
+
+- `docs/SPEC.md` — design of record: why it is built this way, the safety
+  invariants, the Hermes reference pin, and the open items.
+- `CLAUDE.md` — the invariants a contributor (or a future agent session) can break
+  without noticing, and the hard constraints (py3.9 stdlib only, the reentrancy
+  sentinel, never rename an existing slug).
+- `.claude/worklog.md` — one line per decision, including the pre-extraction history
+  from the `bomi-terminal` repo where this loop was originally built.
+- `CHANGELOG.md` — per-release detail.
+
 ## License
 
 MIT
