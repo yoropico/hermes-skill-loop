@@ -1,0 +1,11 @@
+## Session state (devmode)
+- Updated: 2026-07-29 23:41
+- Goal: <task: curator-observ>
+- Branch: 
+- Mental model: 
+- Why: 
+- Decisions: 
+- Gotchas: 
+- Files: 
+- Next: 
+- Open: 

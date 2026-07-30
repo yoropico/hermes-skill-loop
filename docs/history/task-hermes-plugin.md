@@ -1,0 +1,11 @@
+## Session state (devmode)
+- Updated: 2026-07-30 00:05
+- Goal: <task: hermes-plugin>
+- Branch: 
+- Mental model: 
+- Why: 
+- Decisions: 
+- Gotchas: 
+- Files: 
+- Next: 
+- Open: 

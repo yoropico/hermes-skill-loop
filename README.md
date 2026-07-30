@@ -209,6 +209,10 @@ no log.
 - `.claude/worklog.md` — one line per decision, including the pre-extraction history
   from the `bomi-terminal` repo where this loop was originally built.
 - `CHANGELOG.md` — per-release detail.
+- `docs/history/` — the originals from before the extraction: the 2026-07-14 design
+  spec, both execution plans, the five task snapshots, and the verbatim worklog
+  excerpt. `git log` and `git blame` also reach back to 2026-07-14; see
+  `docs/history/README.md` for why that matters here.
 
 ## License
 
