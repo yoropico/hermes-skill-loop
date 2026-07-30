@@ -356,3 +356,29 @@ def test_an_action_that_fails_to_apply_is_recorded_not_swallowed(tmp_path, monke
     assert ev["applied"] == []
     assert ev["failed"][0]["slug"] == "aged"
     assert "read-only filesystem" in ev["failed"][0]["error"]
+
+
+def test_main_noops_inside_our_own_nested_claude_session(tmp_path, monkeypatch):
+    # The curator now runs from a SessionEnd hook, so recursion is live in a way
+    # the old BCT idle trigger made impossible. Chain without this guard:
+    # curator -> `claude -p` -> that session ENDS -> SessionEnd fires -> curator
+    # again. The 24h interval guard does NOT stop it, because .curator_state is
+    # only stamped AFTER curate() returns -- i.e. after the nested call finishes,
+    # which is strictly later than the nested SessionEnd that starts round two.
+    # learn.py has carried this sentinel since PR #200; the curator never did.
+    skills = tmp_path / "skills"; log = tmp_path / "log.jsonl"
+    _mk(skills, "aged", learned_on="2026-06-01")
+    monkeypatch.setenv("SKILL_LOOP_INTERNAL", "1")
+    monkeypatch.setattr(C, "load_config", lambda: {"curator_interval_hours": 0})
+    monkeypatch.setattr(C, "load_prompt", lambda: "PROMPT")
+    monkeypatch.setattr(C, "log_target", lambda: log)
+    called = {"n": 0}
+    def model(prompt, manifest_json):
+        called["n"] += 1
+        return '[{"slug":"aged","op":"archive"}]'
+    rc = C.main(now=NOW, run_claude=model, skills_dir=skills)
+    assert rc == 0
+    assert called["n"] == 0                     # never reached the model
+    assert (skills / "aged").exists()           # nothing applied
+    assert not (skills / ".curator_state").exists()   # clock untouched
+    assert R.read_events(log) == []             # and unlogged: fires on every nested call

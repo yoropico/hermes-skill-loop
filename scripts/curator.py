@@ -294,6 +294,13 @@ def main(now=None, run_claude=None, skills_dir=None, dry_run: bool = False) -> i
     rec = None
     now = now or datetime.now(timezone.utc)
     try:
+        # Reentrancy guard: we are inside a `claude -p` this loop itself spawned,
+        # and its SessionEnd fires this hook again. The interval guard cannot stop
+        # that chain -- .curator_state is stamped only AFTER curate() returns, i.e.
+        # strictly later than the nested SessionEnd that would start round two.
+        # Unlogged on purpose: it triggers on every nested call we make.
+        if os.environ.get("SKILL_LOOP_INTERNAL"):
+            return 0
         cfg = load_config()
         if cfg.get("enabled") is False:
             return 0

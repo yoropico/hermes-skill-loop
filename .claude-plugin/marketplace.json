@@ -1,0 +1,17 @@
+{
+  "name": "hermes-skill-loop",
+  "owner": {
+    "name": "yoros"
+  },
+  "metadata": {
+    "description": "The hermes skill self-learning loop for Claude Code.",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "hermes",
+      "source": "./",
+      "description": "Distills reusable procedures from your sessions into ~/.claude/skills/, tracks which ones get used, and curates them (archive stale, pin proven, never delete). Ships a JSONL run log and a --dry-run preview."
+    }
+  ]
+}

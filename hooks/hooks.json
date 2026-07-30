@@ -1,0 +1,38 @@
+{
+  "hooks": {
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/learn.py\" || python \"${CLAUDE_PLUGIN_ROOT}/scripts/learn.py\"",
+            "async": true,
+            "timeout": 300
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/curator.py\" || python \"${CLAUDE_PLUGIN_ROOT}/scripts/curator.py\"",
+            "async": true,
+            "timeout": 600
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Skill",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/usage.py\" || python \"${CLAUDE_PLUGIN_ROOT}/scripts/usage.py\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
