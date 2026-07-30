@@ -1,4 +1,4 @@
-# .claude/skill-loop/scripts/usage.py
+# scripts/usage.py
 """PreToolUse(Skill) hook: count skill invocations into ~/.claude/skills/.usage.json.
 
 Must never crash the session — main() swallows all errors and returns 0.

@@ -1,4 +1,4 @@
-# .claude/skill-loop/tests/test_curator.py
+# tests/test_curator.py
 import sys, pathlib, json, re
 from datetime import datetime, timezone, timedelta
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "scripts"))

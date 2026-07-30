@@ -1,4 +1,4 @@
-# .claude/skill-loop/tests/test_usage.py
+# tests/test_usage.py
 import sys, pathlib, io, json
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "scripts"))
 import usage as u

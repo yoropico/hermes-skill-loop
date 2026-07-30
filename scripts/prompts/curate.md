@@ -1,4 +1,4 @@
-<!-- .claude/skill-loop/prompts/curate.md -->
+<!-- scripts/prompts/curate.md -->
 You are the CURATOR of a personal skill collection. You are given a JSON manifest
 of agent-created skills:
 [{ "slug", "description", "count", "last_used", "age_days", "pinned" }].

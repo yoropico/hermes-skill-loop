@@ -1,4 +1,4 @@
-# .claude/skill-loop/tests/test_runlog.py
+# tests/test_runlog.py
 import sys, pathlib, json
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "scripts"))
 import runlog as R

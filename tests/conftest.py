@@ -1,4 +1,4 @@
-# .claude/skill-loop/tests/conftest.py
+# tests/conftest.py
 """Test isolation for the skill loop.
 
 Caught live, not by the suite: the first real `curator.py --dry-run` against the

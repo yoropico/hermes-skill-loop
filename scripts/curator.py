@@ -1,4 +1,4 @@
-# .claude/skill-loop/scripts/curator.py
+# scripts/curator.py
 """Idle-triggered curator: reviews agent-created skills and archives/pins them.
 
 Never deletes (archive is a move to _archive/). Touches ONLY skills marked

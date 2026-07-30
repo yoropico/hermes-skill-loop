@@ -1,4 +1,4 @@
-# .claude/skill-loop/scripts/runlog.py
+# scripts/runlog.py
 """Append-only JSONL run log for the skill loop.
 
 Every place this loop can silently do nothing writes one line here: a swallowed
