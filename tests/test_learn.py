@@ -308,3 +308,71 @@ def test_the_reentrancy_sentinel_logs_nothing(tmp_path, monkeypatch):
     L.main(stdin=io.StringIO(_hook()), run_claude=lambda p, t: "{}",
            skills_dir=tmp_path / "skills")
     assert R.read_events(log) == []
+
+
+# --- slug truncation ---------------------------------------------------------
+# The 40-char cap used to cut mid-word: 14 live skills ended up named things like
+# `chromium-extension-indexeddb-offline-rea`. The name IS the matching signal, so a
+# butchered tail costs recall.
+
+def test_slugify_truncates_at_a_word_boundary():
+    long_name = "Chromium extension IndexedDB offline reading"
+    s = L.slugify(long_name)
+    assert len(s) <= 40
+    assert not s.endswith("-")
+    # the old behaviour produced "...offline-rea"; a boundary cut drops the whole
+    # unfinished word instead of leaving a fragment
+    assert s == "chromium-extension-indexeddb-offline"
+
+
+def test_slugify_keeps_short_names_intact():
+    assert L.slugify("Fix the Metal Shader!!") == "fix-the-metal-shader"
+
+
+def test_slugify_falls_back_to_a_hard_cut_for_one_huge_word():
+    # No boundary to cut at -- a hard cut beats returning nothing.
+    s = L.slugify("a" * 60)
+    assert s == "a" * 40
+
+
+def test_slugify_never_returns_empty():
+    assert L.slugify("!!!") == "learned-skill"
+
+
+def test_legacy_slug_truncation_is_still_resolvable(tmp_path):
+    # MIGRATION HAZARD: skills already on disk carry the OLD hard-cut slug. If the
+    # new rule silently resolves the same name to a different slug, the update path
+    # stops finding them and every future lesson forks a stale twin instead of
+    # correcting the original -- the exact failure the two-stage learn was built to
+    # prevent.
+    skills = tmp_path / "skills"
+    legacy = "chromium-extension-indexeddb-offline-rea"      # 40 chars, old cut
+    p = skills / legacy / "SKILL.md"; p.parent.mkdir(parents=True)
+    p.write_text("---\nname: %s\ndescription: d\nx-origin: skill-loop\n---\n\nbody\n" % legacy)
+    name = "Chromium extension IndexedDB offline reading"
+    assert L.slugify(name) != legacy                          # new rule differs
+    found = L.learned_skill_path(skills, name)
+    assert found is not None and found.parent.name == legacy   # legacy still found
+
+
+def test_new_slug_wins_when_both_exist(tmp_path):
+    skills = tmp_path / "skills"
+    name = "Chromium extension IndexedDB offline reading"
+    for slug in (L.slugify(name), "chromium-extension-indexeddb-offline-rea"):
+        p = skills / slug / "SKILL.md"; p.parent.mkdir(parents=True)
+        p.write_text("---\nname: %s\ndescription: d\nx-origin: skill-loop\n---\n\nb\n" % slug)
+    found = L.learned_skill_path(skills, name)
+    assert found.parent.name == L.slugify(name)
+
+
+def test_write_skill_does_not_fork_an_existing_legacy_skill(tmp_path):
+    # Writing must land on the legacy directory, not create a sibling.
+    skills = tmp_path / "skills"
+    legacy = "chromium-extension-indexeddb-offline-rea"
+    p = skills / legacy / "SKILL.md"; p.parent.mkdir(parents=True)
+    p.write_text("---\nname: %s\ndescription: old\nx-origin: skill-loop\n---\n\nold\n" % legacy)
+    out = L.write_skill(skills, {"name": "Chromium extension IndexedDB offline reading",
+                                 "description": "new", "body": "new body"})
+    assert out.parent.name == legacy
+    assert len([d for d in skills.iterdir() if d.is_dir()]) == 1
+    assert "new body" in p.read_text()

@@ -1,7 +1,7 @@
 {
   "name": "hermes",
   "description": "A closed learning loop for Claude Code. Distills reusable procedures from your sessions into ~/.claude/skills/ at session end, counts which ones actually get used, and periodically curates them — archive the stale, pin the proven, never delete. Every run leaves a JSONL record, because the first version of this loop applied nothing at all for 16 days while looking perfectly healthy. The design is ported from the Hermes Agent (NousResearch) Curator; the code is independent, so the intelligence rides on whatever Claude model you point it at.",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": {
     "name": "yoros"
   },

@@ -4,13 +4,17 @@ from datetime import datetime, timezone, timedelta
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "scripts"))
 import curator as C
 
-def _mk(skills, slug, pinned=False, learned_on=None):
+def _mk(skills, slug, pinned=False, learned_on=None, body=None,
+        desc="Use when the thing happens."):
+    # Real learned skills always carry a description — it is what Claude Code
+    # matches on — so the fixture carries one too, or listing-cost assertions
+    # measure an artefact of the test instead of the product.
     p = skills / slug / "SKILL.md"; p.parent.mkdir(parents=True, exist_ok=True)
-    fm = "---\nname: %s\nx-origin: skill-loop\n%s%s---\n\n# %s\n" % (
-        slug,
+    fm = "---\nname: %s\ndescription: %s\nx-origin: skill-loop\n%s%s---\n\n%s\n" % (
+        slug, desc,
         "x-pinned: true\n" if pinned else "",
         "x-learned: %s\n" % learned_on if learned_on else "",
-        slug)
+        body if body is not None else "# %s" % slug)
     p.write_text(fm); return p
 
 def test_should_run_interval():
@@ -382,3 +386,191 @@ def test_main_noops_inside_our_own_nested_claude_session(tmp_path, monkeypatch):
     assert (skills / "aged").exists()           # nothing applied
     assert not (skills / ".curator_state").exists()   # clock untouched
     assert R.read_events(log) == []             # and unlogged: fires on every nested call
+
+
+# --- consolidate -------------------------------------------------------------
+# The original spec promised consolidate alongside archive/pin; only archive and
+# pin were ever built, so near-duplicate skills accumulate forever. Archiving the
+# weaker one loses whatever it knew that the survivor did not.
+
+def test_plan_accepts_consolidate_with_a_target(tmp_path):
+    skills = tmp_path / "skills"
+    _mk(skills, "weak", learned_on="2026-06-01")
+    _mk(skills, "strong", learned_on="2026-06-01")
+    planned, skipped = C.plan_actions(
+        [{"slug": "weak", "op": "consolidate", "into": "strong"}], skills, 7, NOW)
+    assert skipped == []
+    assert planned[0]["op"] == "consolidate" and planned[0]["into"] == "strong"
+
+
+def test_consolidate_without_a_target_is_refused(tmp_path):
+    # Consolidating into nothing is just an archive by another name, and it would
+    # silently discard the loser's content. Make the model say where it goes.
+    skills = tmp_path / "skills"
+    _mk(skills, "weak", learned_on="2026-06-01")
+    planned, skipped = C.plan_actions(
+        [{"slug": "weak", "op": "consolidate"}], skills, 7, NOW)
+    assert planned == []
+    assert skipped[0]["reason"] == C.SKIP_NO_TARGET
+
+
+def test_consolidate_into_an_unknown_or_foreign_skill_is_refused(tmp_path):
+    skills = tmp_path / "skills"
+    _mk(skills, "weak", learned_on="2026-06-01")
+    (skills / "foreign").mkdir()
+    (skills / "foreign" / "SKILL.md").write_text("---\nname: foreign\n---\n")
+    for target in ("ghost", "foreign"):
+        planned, skipped = C.plan_actions(
+            [{"slug": "weak", "op": "consolidate", "into": target}], skills, 7, NOW)
+        assert planned == [], target
+        assert skipped[0]["reason"] == C.SKIP_BAD_TARGET, target
+
+
+def test_consolidate_into_itself_is_refused(tmp_path):
+    skills = tmp_path / "skills"
+    _mk(skills, "same", learned_on="2026-06-01")
+    planned, skipped = C.plan_actions(
+        [{"slug": "same", "op": "consolidate", "into": "same"}], skills, 7, NOW)
+    assert planned == [] and skipped[0]["reason"] == C.SKIP_BAD_TARGET
+
+
+def test_consolidate_respects_pinned_and_the_age_floor(tmp_path):
+    skills = tmp_path / "skills"
+    _mk(skills, "pinnedone", pinned=True, learned_on="2026-06-01")
+    _mk(skills, "young", learned_on="2026-07-15")
+    _mk(skills, "survivor", learned_on="2026-06-01")
+    planned, skipped = C.plan_actions(
+        [{"slug": "pinnedone", "op": "consolidate", "into": "survivor"},
+         {"slug": "young", "op": "consolidate", "into": "survivor"}], skills, 7, NOW)
+    assert planned == []
+    assert {s["reason"] for s in skipped} == {C.SKIP_PINNED, C.SKIP_TOO_YOUNG}
+
+
+def test_consolidate_merges_the_body_then_archives_the_loser(tmp_path):
+    skills = tmp_path / "skills"; arch = skills / "_archive"
+    _mk(skills, "weak", learned_on="2026-06-01", body="WEAK KNOWLEDGE")
+    _mk(skills, "strong", learned_on="2026-06-01", body="STRONG KNOWLEDGE")
+    seen = {}
+    def merge(prompt, payload):
+        seen["prompt"] = prompt; seen["payload"] = payload
+        return '{"body": "MERGED BODY"}'
+    applied, failed = C._execute(
+        [{"slug": "weak", "op": "consolidate", "into": "strong",
+          "md": skills / "weak" / "SKILL.md",
+          "target_md": skills / "strong" / "SKILL.md"}],
+        arch, run_claude=merge)
+    assert failed == []
+    assert applied == ["consolidate:weak->strong"]
+    # both bodies reached the model
+    assert "WEAK KNOWLEDGE" in seen["payload"] and "STRONG KNOWLEDGE" in seen["payload"]
+    survivor = (skills / "strong" / "SKILL.md").read_text()
+    assert "MERGED BODY" in survivor
+    assert "x-origin: skill-loop" in survivor          # frontmatter preserved
+    assert not (skills / "weak").exists()              # loser moved out
+    archived = (arch / "weak" / "SKILL.md").read_text()
+    assert "x-consolidated-into: strong" in archived   # provenance recorded
+
+
+def test_consolidate_keeps_both_when_the_merge_fails(tmp_path):
+    # A failed merge must not archive the loser -- that would destroy content with
+    # nothing gained. Neither skill moves, and the failure is reported.
+    skills = tmp_path / "skills"; arch = skills / "_archive"
+    _mk(skills, "weak", learned_on="2026-06-01")
+    _mk(skills, "strong", learned_on="2026-06-01")
+    def refuse(prompt, payload):
+        return "I would rather not."
+    applied, failed = C._execute(
+        [{"slug": "weak", "op": "consolidate", "into": "strong",
+          "md": skills / "weak" / "SKILL.md",
+          "target_md": skills / "strong" / "SKILL.md"}],
+        arch, run_claude=refuse)
+    assert applied == []
+    assert failed[0]["slug"] == "weak" and "merge" in failed[0]["error"].lower()
+    assert (skills / "weak").exists() and (skills / "strong").exists()
+
+
+def test_curate_end_to_end_consolidates(tmp_path, monkeypatch):
+    skills = tmp_path / "skills"; log = tmp_path / "log.jsonl"
+    _mk(skills, "dup", learned_on="2026-06-01", body="DUP")
+    _mk(skills, "keeper", learned_on="2026-06-01", body="KEEP")
+    monkeypatch.setattr(C, "load_config", lambda: {"curator_interval_hours": 0})
+    monkeypatch.setattr(C, "load_prompt", lambda name="curate.md":
+                        "MERGE" if name == "consolidate.md" else "CURATE")
+    monkeypatch.setattr(C, "log_target", lambda: log)
+    def model(prompt, payload):
+        if prompt.startswith("MERGE"):
+            return '{"body": "MERGED"}'
+        return '[{"slug":"dup","op":"consolidate","into":"keeper"}]'
+    C.main(now=NOW, run_claude=model, skills_dir=skills)
+    ev = [e for e in R.read_events(log) if e["role"] == "curator"][-1]
+    assert ev["applied"] == ["consolidate:dup->keeper"]
+    assert "MERGED" in (skills / "keeper" / "SKILL.md").read_text()
+    assert not (skills / "dup").exists()
+
+
+def test_dry_run_never_calls_the_merge_model(tmp_path, monkeypatch):
+    # A preview that rewrites the survivor is not a preview.
+    skills = tmp_path / "skills"; log = tmp_path / "log.jsonl"
+    _mk(skills, "dup", learned_on="2026-06-01")
+    _mk(skills, "keeper", learned_on="2026-06-01", body="ORIGINAL")
+    monkeypatch.setattr(C, "load_config", lambda: {"curator_interval_hours": 0})
+    monkeypatch.setattr(C, "load_prompt", lambda name="curate.md": "P")
+    monkeypatch.setattr(C, "log_target", lambda: log)
+    calls = {"n": 0}
+    def model(prompt, payload):
+        calls["n"] += 1
+        return '[{"slug":"dup","op":"consolidate","into":"keeper"}]'
+    C.main(now=NOW, run_claude=model, skills_dir=skills, dry_run=True)
+    assert calls["n"] == 1                       # the plan call only
+    ev = [e for e in R.read_events(log) if e["role"] == "curator"][-1]
+    assert ev["would_apply"] == ["consolidate:dup->keeper"]
+    assert "ORIGINAL" in (skills / "keeper" / "SKILL.md").read_text()
+    assert (skills / "dup").exists()
+
+
+# --- size / cost signals -----------------------------------------------------
+# Every learned skill's description is injected into EVERY session's listing, and
+# its body is loaded whenever it is invoked. The curator was judging usefulness
+# with no idea what any of it costs.
+
+def test_manifest_carries_size_and_listing_cost(tmp_path):
+    skills = tmp_path / "skills"
+    _mk(skills, "small", learned_on="2026-06-01", body="tiny")
+    _mk(skills, "big", learned_on="2026-06-01", body="X" * 20000)
+    m = {e["slug"]: e for e in C.build_manifest(skills, now=NOW)}
+    assert m["big"]["size_bytes"] > 20000 > m["small"]["size_bytes"]
+    # listing_tokens prices the always-on cost: slug + description, not the body.
+    assert m["small"]["listing_tokens"] == m["big"]["listing_tokens"]
+    assert m["small"]["listing_tokens"] > 0
+
+
+def test_manifest_size_is_the_whole_file(tmp_path):
+    skills = tmp_path / "skills"
+    p = _mk(skills, "one", learned_on="2026-06-01", body="abc")
+    m = C.build_manifest(skills, now=NOW)[0]
+    assert m["size_bytes"] == len(p.read_bytes())
+
+
+def test_curate_reports_the_collection_totals(tmp_path, monkeypatch):
+    # The totals belong in the log too: "is this collection getting cheaper or
+    # more expensive?" is the question curation is supposed to answer.
+    skills = tmp_path / "skills"; log = tmp_path / "log.jsonl"
+    _mk(skills, "a", learned_on="2026-06-01", body="x" * 1000)
+    _mk(skills, "b", learned_on="2026-06-01", body="y" * 500)
+    monkeypatch.setattr(C, "load_config", lambda: {"curator_interval_hours": 0})
+    monkeypatch.setattr(C, "load_prompt", lambda name="curate.md": "P")
+    monkeypatch.setattr(C, "log_target", lambda: log)
+    C.main(now=NOW, run_claude=lambda p, m: "[]", skills_dir=skills)
+    ev = [e for e in R.read_events(log) if e["role"] == "curator"][-1]
+    assert ev["total_bytes"] > 1500
+    assert ev["total_listing_tokens"] > 0
+
+
+def test_the_prompt_documents_every_op_the_planner_accepts():
+    # Drift guard, same lesson as the slug/skill key mismatch: an op the prompt
+    # never mentions is an op the model never proposes, so the capability is dead
+    # code. An op the planner does not know is silently dropped.
+    prompt = (pathlib.Path(C.__file__).resolve().parent / "prompts" / "curate.md").read_text()
+    for op in ("keep", "archive", "pin", "consolidate"):
+        assert '"%s"' % op in prompt, op
+    assert '"into"' in prompt, "consolidate needs its target field documented"

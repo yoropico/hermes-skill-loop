@@ -51,9 +51,44 @@ def load_prompt(name: str = "learn.md") -> str:
     return (SCRIPT_DIR / "prompts" / name).read_text(encoding="utf-8")
 
 
+SLUG_CAP = 40
+
+
+def _dashed(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+
+
 def slugify(text: str) -> str:
-    s = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
-    return s[:40].strip("-") or "learned-skill"
+    """Slug for a skill name, truncated at a WORD boundary.
+
+    A hard cut at 40 produced names like `chromium-extension-indexeddb-offline-rea`
+    (14 of them, live). The slug is a matching signal, so a severed final word is
+    worse than no final word — drop the whole unfinished token instead. Falls back
+    to a hard cut when there is no boundary to cut at (one very long word).
+    """
+    s = _dashed(text)
+    if len(s) <= SLUG_CAP:
+        return s or "learned-skill"
+    cut = s[:SLUG_CAP]
+    if "-" in cut:
+        cut = cut[:cut.rfind("-")]
+    return cut.strip("-") or s[:SLUG_CAP].strip("-") or "learned-skill"
+
+
+def legacy_slug(text: str) -> str:
+    """The pre-2026-07-30 hard cut. Kept ONLY so skills already written under it
+    stay resolvable — never used to name anything new."""
+    s = _dashed(text)
+    return s[:SLUG_CAP].strip("-") or "learned-skill"
+
+
+def slug_candidates(text: str) -> list:
+    """Every directory name a given skill name may live under, best first."""
+    out = [slugify(text)]
+    legacy = legacy_slug(text)
+    if legacy != out[0]:
+        out.append(legacy)
+    return out
 
 
 def build_skill_md(name: str, description: str, body: str,
@@ -119,9 +154,19 @@ def skill_index(skills_dir: Path) -> str:
 
 
 def learned_skill_path(skills_dir: Path, name: str) -> Path | None:
-    """The SKILL.md for `name`, only if it exists AND we authored it."""
-    md = Path(skills_dir) / slugify(name) / "SKILL.md"
-    return md if md.is_file() and skill_meta.is_learned(md) else None
+    """The SKILL.md for `name`, only if it exists AND we authored it.
+
+    Checks the legacy hard-cut slug as well as the current one. Without that, the
+    word-boundary change would quietly stop resolving the 14 skills already on
+    disk under the old name — and every later lesson about them would fork a stale
+    twin instead of correcting the original, which is the precise failure the
+    two-stage learn exists to prevent.
+    """
+    for slug in slug_candidates(name):
+        md = Path(skills_dir) / slug / "SKILL.md"
+        if md.is_file() and skill_meta.is_learned(md):
+            return md
+    return None
 
 
 def distill(transcript_text: str, prompt: str, run_claude) -> dict | None:
@@ -140,12 +185,20 @@ def distill(transcript_text: str, prompt: str, run_claude) -> dict | None:
 def write_skill(skills_dir: Path, result: dict,
                 session_id: str | None = None, learned_on: str | None = None) -> Path | None:
     """Write SKILL.md. Returns None — writing NOTHING — if the slug collides with
-    a skill we did not author (a BCT-deployed one). Overwriting it would both
-    destroy it and stamp it x-origin: skill-loop, handing it to the curator."""
-    slug = slugify(result["name"])
-    dst = Path(skills_dir) / slug / "SKILL.md"
-    if dst.is_file() and not skill_meta.is_learned(dst):
-        return None
+    a skill we did not author (a deployed one). Overwriting it would both destroy
+    it and stamp it x-origin: skill-loop, handing it to the curator.
+
+    An existing skill of ours wins over a fresh slug, including one written under
+    the legacy hard-cut name — otherwise the boundary-truncation change would fork
+    a twin beside every one of them."""
+    existing = learned_skill_path(skills_dir, result["name"])
+    if existing is not None:
+        slug, dst = existing.parent.name, existing
+    else:
+        slug = slugify(result["name"])
+        dst = Path(skills_dir) / slug / "SKILL.md"
+        if dst.is_file() and not skill_meta.is_learned(dst):
+            return None
     dst.parent.mkdir(parents=True, exist_ok=True)
     dst.write_text(
         build_skill_md(slug, result["description"], result["body"], session_id, learned_on),

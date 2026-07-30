@@ -44,7 +44,7 @@ so a stale BCT will undo the migration the next time it starts.
 | Hook | Script | What it does |
 |---|---|---|
 | `SessionEnd` (async) | `learn.py` | Reads the transcript, asks the model whether a reusable procedure emerged, writes or updates one `SKILL.md` |
-| `SessionEnd` (async) | `curator.py` | Interval-guarded (24h). Reviews learned skills and archives / pins |
+| `SessionEnd` (async) | `curator.py` | Interval-guarded (24h). Reviews learned skills and archives / pins / consolidates |
 | `PreToolUse` (`Skill`) | `usage.py` | Bumps `count` + `last_used` in `~/.claude/skills/.usage.json` |
 
 Both `SessionEnd` hooks are `async`, so nothing delays session exit. Every nested
@@ -122,6 +122,38 @@ used to just return 0, which is indistinguishable from a quiet, healthy loop.
 
 Happy paths log nothing on purpose: the reentrancy sentinel and ordinary skill
 invocations fire constantly and would bury everything worth reading.
+
+## Ops the curator can propose
+
+| op | effect |
+|---|---|
+| `keep` | nothing (the default, and the common case) |
+| `archive` | move to `~/.claude/skills/_archive/` — recoverable, never a delete |
+| `pin` | stamp `x-pinned: true`, exempting it from all future auto-archiving |
+| `consolidate` | merge this skill's body **into** another, then archive it with `x-consolidated-into` |
+
+`consolidate` is the op the original design promised and never shipped, which is why
+near-duplicates accumulated indefinitely — `archive` alone throws away whatever the
+weaker skill knew that the survivor did not, and that is usually the specific detail
+that made it worth learning.
+
+The merge is a second model pass told to lose nothing, and the order matters: the
+merge must succeed **before** anything moves. Archiving first would, on a failed
+merge, leave the knowledge only in `_archive/` — destroyed for practical purposes
+with nothing gained. A refused merge keeps both skills and reports a failure.
+
+`consolidate` requires `into`, refuses a target that is itself / unknown / not ours,
+and answers to the pinned bypass and the age floor exactly as `archive` does. A
+`--dry-run` returns before any merge call — a preview that rewrote the survivor
+would not be a preview.
+
+### Cost signals
+
+The manifest carries `size_bytes` and `listing_tokens` per skill, plus `total_bytes`
+and `total_listing_tokens` in the log. `listing_tokens` is the standing price: a
+skill's `slug: description` line is injected into **every** session whether it is
+used or not. The curator used to judge usefulness with no idea what anything cost —
+a 40KB skill used twice is a very different proposition from a 2KB one used twice.
 
 ## Preview before letting it act
 
