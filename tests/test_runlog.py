@@ -55,12 +55,23 @@ def test_read_events_tolerates_a_corrupt_line(tmp_path):
     assert [e["n"] for e in R.read_events(log)] == [1, 2]
 
 
-def test_log_path_honours_config_override(monkeypatch, tmp_path):
+def test_log_path_honours_config_override(monkeypatch, tmp_path, unpatched_log_path):
     monkeypatch.setattr(R, "load_config", lambda: {"log_path": str(tmp_path / "custom.jsonl")})
-    assert R.log_path() == tmp_path / "custom.jsonl"
+    assert unpatched_log_path() == tmp_path / "custom.jsonl"
 
 
-def test_log_path_defaults_under_dot_claude(monkeypatch, tmp_path):
+def test_log_path_defaults_under_dot_claude(monkeypatch, tmp_path, unpatched_log_path):
     monkeypatch.setattr(R, "load_config", lambda: {})
     monkeypatch.setattr(R.Path, "home", staticmethod(lambda: tmp_path))
-    assert R.log_path() == tmp_path / ".claude" / "skill-loop.jsonl"
+    assert unpatched_log_path() == tmp_path / ".claude" / "skill-loop.jsonl"
+
+
+def test_the_suite_can_never_write_to_the_real_log(isolated_run_log, tmp_path):
+    # Pins the conftest guard itself. Without it, any test calling main() forges
+    # events into ~/.claude/skill-loop.jsonl -- the one file you would trust to
+    # tell you what the loop really did (found live on 2026-07-30: 10 fake events).
+    import curator, learn, usage
+    real = pathlib.Path.home() / ".claude" / "skill-loop.jsonl"
+    for resolved in (R.log_path(), curator.log_target(), learn.log_target(), usage.log_target()):
+        assert resolved == isolated_run_log
+        assert resolved != real
