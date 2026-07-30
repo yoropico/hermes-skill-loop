@@ -7,7 +7,25 @@ description: Inspect and drive the hermes skill loop — preview what the curato
 
 Drive the skill self-learning loop. Arguments: `$ARGUMENTS`
 
-Interpret the argument and do exactly one of the following. With no argument, do `status`.
+Interpret the argument and do exactly one of the following. With no argument, do `doctor`.
+
+## `doctor`
+
+The first thing to run when anything seems off, and the honest answer to "is this
+even working?":
+
+```bash
+python3 "$CLAUDE_PLUGIN_ROOT/scripts/doctor.py"
+```
+
+Ten checks over the environment, the config, the run log and the skill store. Report
+its output as-is, then explain any `WARN`/`FAIL` in plain terms and what to do about
+it. Exit code is 1 if anything failed.
+
+The check that matters most is `reconciliation`: for a healthy curator run,
+`proposed == kept + acted + skipped`. When that arithmetic breaks, the model's
+decisions are being dropped on the floor — the defect that made this loop a
+16-day no-op.
 
 ## `status`
 

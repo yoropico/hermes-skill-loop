@@ -62,6 +62,31 @@ ours.
 
 `x-pinned: true` exempts a skill from archiving entirely.
 
+## Is it working? — `/hermes doctor`
+
+```
+OK    python          3.9.6
+OK    claude-cli      /Users/you/.local/bin/claude
+OK    config          learn=claude-sonnet-5 curator=claude-opus-5
+OK    log             /Users/you/.claude/skill-loop.jsonl
+OK    hooks           1 hook event(s); last learn at 2026-07-30T00:10:30+00:00
+OK    last-run        dry_run at 2026-07-29T23:57:43+00:00 (applied=[] skipped=0)
+OK    reconciliation  63 proposed = 52 kept + 11 acted + 0 skipped
+OK    skills          learned=63 never-used=31 listing~6140 tok
+WARN  slugs           14 slug(s) sit exactly on the 40-char cap …
+OK    descriptions    every learned skill has a description
+```
+
+Ten checks; exit 1 if any FAIL. The one that matters most is **`reconciliation`** —
+for a healthy curator run `proposed == kept + acted + skipped`. When that arithmetic
+breaks, the model's decisions are being dropped on the floor, which is precisely the
+defect that made this loop a 16-day no-op. It is a check nobody had to be clever to
+write; it just had to exist.
+
+`hooks` uses the log as evidence rather than guessing: there is no way to introspect
+Claude Code's active hook table, but a `learn` or `usage` event can only exist
+because a hook fired.
+
 ## Run log — read this before believing the loop works
 
 `~/.claude/skill-loop.jsonl` (override with `log_path`). One JSON object per line,
